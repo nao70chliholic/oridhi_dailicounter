@@ -68,7 +68,14 @@ def get_financie_stats_with_playwright() -> tuple[int, float]:
             float_part = float_part_el.get_text(strip=True)
             price = float(int_part + float_part)
 
-            return members, price
+            # --- トークン総数を取得 ---
+            # 例: （トークン総数2,900,000）
+            token_supply_match = re.search(r'（トークン総数([\d,]+)）', html_price)
+            if not token_supply_match:
+                raise ValueError("トークン総数が見つかりません")
+            token_supply = int(token_supply_match.group(1).replace(',', ''))
+
+            return members, price, token_supply
 
         except Exception as e:
             print(f"スクレイピングエラー: {e}")
@@ -76,15 +83,15 @@ def get_financie_stats_with_playwright() -> tuple[int, float]:
         finally:
             browser.close()
 
-def get_last_stats() -> tuple[int | None, float | None]:
+def get_last_stats() -> tuple[int | None, float | None, int | None]:
     """CSVから最新の統計データを読み込む"""
     if not CSV_PATH.exists():
-        return None, None
+        return None, None, None
     with open(CSV_PATH, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
         header = next(reader, None)  # ヘッダーを読み込む
         if not header:
-            return None, None
+            return None, None, None
 
         # 日付ごとの最新データを格納する辞書
         daily_stats = {}
@@ -93,13 +100,14 @@ def get_last_stats() -> tuple[int | None, float | None]:
                 date_str = row[0]
                 members = int(row[1])
                 price = float(row[2])
-                daily_stats[date_str] = (members, price)
+                token_supply = int(row[3]) if len(row) > 3 else None # トークン在庫を追加
+                daily_stats[date_str] = (members, price, token_supply)
             except (ValueError, IndexError) as e:
                 print(f"CSVの行の解析エラー: {row}, エラー: {e}")
                 continue
 
         if not daily_stats:
-            return None, None
+            return None, None, None
 
         # 日付をソートして最新の日付と前日の日付を取得
         sorted_dates = sorted(daily_stats.keys())
@@ -117,7 +125,7 @@ def get_last_stats() -> tuple[int | None, float | None]:
         else:
             # 前日のデータがない場合は、最新のデータを使用（初回実行時など）
             return daily_stats[latest_date]
-    return None, None
+    return None, None, None
 
 def post_to_discord(message: str):
     """Discord Webhook へメッセージを投稿"""
@@ -134,18 +142,20 @@ def main():
     today_str = datetime.now(JST).strftime('%Y-%m-%d')
 
     try:
-        members, price = get_financie_stats_with_playwright()
+        members, price, token_supply = get_financie_stats_with_playwright()
     except Exception:
         return
 
-    last_f, last_p = get_last_stats()
+    last_f, last_p, last_ts = get_last_stats()
 
     diff_f = f"{members - last_f:+,}" if last_f is not None else "―"
     diff_p = f"{price - last_p:+.4f}" if last_p is not None else "―"
+    diff_ts = f"{token_supply - last_ts:+,}" if last_ts is not None else "―"
 
-    message = f"""f"◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%_m月%_d日')} 6時時点）
+    message = f"""◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%_m月%_d日')} 6時時点）
 ・メンバー数 {members:,}人（前日比 {diff_f}人）
 ・トークン価格 {price:.4f}円（前日比 {diff_p}円）
+・トークン在庫 {token_supply:,}枚（前日比 {diff_ts}枚）
 #CNPオロチ #開運オロチ"""
     print(message)
 
@@ -155,8 +165,8 @@ def main():
     with open(CSV_PATH, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(['date', 'followers', 'price_jpy'])
-        writer.writerow([today_str, members, price])
+            writer.writerow(['date', 'followers', 'price_jpy', 'token_supply'])
+        writer.writerow([today_str, members, price, token_supply])
     print(f"Successfully saved data to {CSV_PATH}")
 
 if __name__ == '__main__':
