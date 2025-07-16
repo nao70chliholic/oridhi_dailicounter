@@ -82,12 +82,41 @@ def get_last_stats() -> tuple[int | None, float | None]:
         return None, None
     with open(CSV_PATH, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
-        next(reader, None)  # ヘッダーをスキップ
-        last_row = None
+        header = next(reader, None)  # ヘッダーを読み込む
+        if not header:
+            return None, None
+
+        # 日付ごとの最新データを格納する辞書
+        daily_stats = {}
         for row in reader:
-            last_row = row
-        if last_row:
-            return int(last_row[1]), float(last_row[2])
+            try:
+                date_str = row[0]
+                members = int(row[1])
+                price = float(row[2])
+                daily_stats[date_str] = (members, price)
+            except (ValueError, IndexError) as e:
+                print(f"CSVの行の解析エラー: {row}, エラー: {e}")
+                continue
+
+        if not daily_stats:
+            return None, None
+
+        # 日付をソートして最新の日付と前日の日付を取得
+        sorted_dates = sorted(daily_stats.keys())
+        
+        # 最新の日付のデータ
+        latest_date = sorted_dates[-1]
+        
+        # 前日の日付のデータ
+        previous_date = None
+        if len(sorted_dates) >= 2:
+            previous_date = sorted_dates[-2]
+
+        if previous_date:
+            return daily_stats[previous_date]
+        else:
+            # 前日のデータがない場合は、最新のデータを使用（初回実行時など）
+            return daily_stats[latest_date]
     return None, None
 
 def post_to_discord(message: str):
@@ -114,9 +143,10 @@ def main():
     diff_f = f"{members - last_f:+,}" if last_f is not None else "―"
     diff_p = f"{price - last_p:+.4f}" if last_p is not None else "―"
 
-    message = (
-        message = (        f"◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%m月%d日')} 6時時点）\n"        f"・メンバー数 {members:,}人（前日比 {diff_f}人）\n"        f"・トークン価格 {price:.4f}円（前日比 {diff_p}円）\n"        f"#CNPオロチ #開運オロチ"    )
-    )
+    message = f"""◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%m%d日')} 6時時点）
+・メンバー数 {members:,}人（前日比 {diff_f}人）
+・トークン価格 {price:.4f}円（前日比 {diff_p}円）
+#CNPオロチ #開運オロチ"""
     print(message)
 
     post_to_discord(message)
