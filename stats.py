@@ -68,12 +68,11 @@ def get_financie_stats_with_playwright() -> tuple[int, float]:
             float_part = float_part_el.get_text(strip=True)
             price = float(int_part + float_part)
 
-            # --- トークン総数を取得 ---
-            # 例: （トークン総数2,900,000）
-            token_supply_match = re.search(r'（トークン総数([\d,]+)）', html_price)
-            if not token_supply_match:
-                raise ValueError("トークン総数が見つかりません")
-            token_supply = int(token_supply_match.group(1).replace(',', ''))
+            # --- トークン在庫を取得 ---
+            token_supply_span = soup_price.find('span', class_='currency int-part')
+            if not token_supply_span:
+                raise ValueError("トークン在庫の要素が見つかりません")
+            token_supply = int(token_supply_span.get_text(strip=True).replace(',', ''))
 
             return members, price, token_supply
 
