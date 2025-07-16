@@ -92,14 +92,25 @@ def get_last_stats() -> tuple[int | None, float | None, int | None]:
         if not header:
             return None, None, None
 
+        # ヘッダーから列のインデックスを取得
+        try:
+            date_idx = header.index('date')
+            followers_idx = header.index('followers')
+            price_idx = header.index('price_jpy')
+            # token_supply列は存在しない可能性を考慮
+            token_supply_idx = header.index('token_supply') if 'token_supply' in header else -1
+        except ValueError as e:
+            print(f"CSVヘッダーエラー: {e}")
+            return None, None, None
+
         # 日付ごとの最新データを格納する辞書
         daily_stats = {}
         for row in reader:
             try:
-                date_str = row[0]
-                members = int(row[1])
-                price = float(row[2])
-                token_supply = int(row[3]) if len(row) > 3 else None # トークン在庫を追加
+                date_str = row[date_idx]
+                members = int(row[followers_idx])
+                price = float(row[price_idx])
+                token_supply = int(row[token_supply_idx]) if token_supply_idx != -1 and len(row) > token_supply_idx and row[token_supply_idx] else None
                 daily_stats[date_str] = (members, price, token_supply)
             except (ValueError, IndexError) as e:
                 print(f"CSVの行の解析エラー: {row}, エラー: {e}")
@@ -111,20 +122,15 @@ def get_last_stats() -> tuple[int | None, float | None, int | None]:
         # 日付をソートして最新の日付と前日の日付を取得
         sorted_dates = sorted(daily_stats.keys())
         
-        # 最新の日付のデータ
-        latest_date = sorted_dates[-1]
-        
-        # 前日の日付のデータ
-        previous_date = None
+        # 前日の日付のデータを取得
         if len(sorted_dates) >= 2:
             previous_date = sorted_dates[-2]
-
-        if previous_date:
-            return daily_stats[previous_date]
+            return daily_stats.get(previous_date, (None, None, None))
+        elif len(sorted_dates) == 1:
+             # データが1つしかない場合は、それを返す（前日比は計算されない）
+            return daily_stats[sorted_dates[0]]
         else:
-            # 前日のデータがない場合は、最新のデータを使用（初回実行時など）
-            return daily_stats[latest_date]
-    return None, None, None
+            return None, None, None
 
 def post_to_discord(message: str):
     """Discord Webhook へメッセージを投稿"""
@@ -151,7 +157,7 @@ def main():
     diff_p = f"{price - last_p:+.4f}" if last_p is not None else "―"
     diff_ts = f"{token_supply - last_ts:+,}" if last_ts is not None else "―"
 
-    message = f"""◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%_m月%_d日')} 6時時点）
+    message = f"""◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%_m月%_d日 %H:%M')}時点）
 ・メンバー数 {members:,}人（前日比 {diff_f}人）
 ・トークン価格 {price:.4f}円（前日比 {diff_p}円）
 ・トークン在庫 {token_supply:,}枚（前日比 {diff_ts}枚）
