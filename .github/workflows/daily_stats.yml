@@ -2,7 +2,7 @@ name: Daily Stats Poster
 
 on:
   schedule:
-    - cron: '0 1 * * *' # 10:00 JST
+    - cron: '0 21 * * *' # 06:00 JST
   workflow_dispatch: # for manual runs
 
 jobs:

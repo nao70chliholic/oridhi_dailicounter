@@ -115,10 +115,7 @@ def main():
     diff_p = f"{price - last_p:+.4f}" if last_p is not None else "―"
 
     message = (
-        f"◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%m月%d日')} 10時時点）\n"
-        f"・メンバー数 {members:,}人（前日比 {diff_f}人）\n"
-        f"・トークン価格 {price:.4f}円（前日比 {diff_p}円）\n"
-        f"#CNPオロチ #開運オロチ"
+        message = (        f"◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%m月%d日')} 6時時点）\n"        f"・メンバー数 {members:,}人（前日比 {diff_f}人）\n"        f"・トークン価格 {price:.4f}円（前日比 {diff_p}円）\n"        f"#CNPオロチ #開運オロチ"    )
     )
     print(message)
 
