@@ -1,178 +1,125 @@
 import os
-import csv
 import re
-import requests
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
+import pandas as pd
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta, timezone
 from playwright.sync_api import sync_playwright
+import requests
 
-# --- 定数 ---
-JST = timezone(timedelta(hours=+9), 'JST')
-BASE_DIR = Path(__file__).resolve().parent
-CSV_PATH = BASE_DIR / 'stats.csv'
-
-# FiNANCiEのコミュニティ公開WebページのURL
-FINANCIE_MEMBER_URL = 'https://financie.jp/users/orochi_cnp'
-FINANCIE_PRICE_URL = 'https://financie.jp/communities/orochi_cnp/market'
-
-# --- 環境変数を読み込み ---
+# 環境変数の読み込み
 load_dotenv()
-DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK')
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+FINANCIE_URL = "https://financie.jp/communities/orochi_cnp/"
+STATS_CSV_PATH = "stats.csv"
 
-def get_financie_stats_with_playwright() -> tuple[int, float]:
-    """Playwrightを使用してFiNANCiEのWebページをスクレイピングしてメンバー数とトークン価格を取得"""
+def get_financie_data_from_web():
+    """FiNANCiEのWebページからメンバー数を取得する"""
     with sync_playwright() as p:
         browser = p.chromium.launch()
+        page = browser.new_page()
         try:
-            # --- メンバー数を取得 ---
-            page_member = browser.new_page()
-            page_member.goto(FINANCIE_MEMBER_URL)
-            page_member.wait_for_selector('#script__trading_card_rate') # 要素が表示されるまで待機
-            html_member = page_member.content()
-            soup_member = BeautifulSoup(html_member, 'lxml')
-
-            member_span = soup_member.find('span', id='script__trading_card_rate')
-            if not member_span:
-                raise ValueError("メンバー数の要素が見つかりません")
-            
-            full_member_text = member_span.get_text(strip=True)
-            members_match = re.search(r'(\d{1,3}(?:,\d{3})*)', full_member_text)
-            if not members_match:
-                raise ValueError("メンバー数の数値が見つかりません")
-            members = int(members_match.group(1).replace(',', ''))
-
-            # --- トークン価格を取得 ---
-            page_price = browser.new_page()
-            page_price.goto(FINANCIE_PRICE_URL)
-            page_price.wait_for_selector('.js-bancor-latest-price') # 要素が表示されるまで待機
-            html_price = page_price.content()
-            soup_price = BeautifulSoup(html_price, 'lxml')
-
-            price_span = soup_price.find('span', class_='js-bancor-latest-price')
-            if not price_span:
-                raise ValueError("トークン価格の要素が見つかりません")
-            
-            connector_price_span = price_span.find('span', class_='connector-price')
-            if not connector_price_span:
-                raise ValueError("トークン価格のコネクタ要素が見つかりません")
-
-            int_part_el = connector_price_span.find('span', class_='int-part')
-            float_part_el = connector_price_span.find('span', class_='float-part')
-
-            if not int_part_el or not float_part_el:
-                raise ValueError("トークン価格の整数部または小数部の要素が見つかりません")
-
-            int_part = int_part_el.get_text(strip=True)
-            float_part = float_part_el.get_text(strip=True)
-            price = float(int_part + float_part)
-
-            # --- トークン在庫を取得 ---
-            token_supply_span = soup_price.find('span', class_='currency int-part')
-            if not token_supply_span:
-                raise ValueError("トークン在庫の要素が見つかりません")
-            token_supply = int(token_supply_span.get_text(strip=True).replace(',', ''))
-
-            return members, price, token_supply
-
+            page.goto(FINANCIE_URL, timeout=60000)
+            # メンバー数の要素を取得
+            member_element = page.query_selector(".profile_databox .profile_num")
+            if member_element:
+                member_text = member_element.inner_text()
+                # 数字のみを抽出
+                members = int(re.sub(r'[^0-9]', '', member_text))
+                return {"owner_count": members}
+            else:
+                print("Could not find member count element.")
+                return None
         except Exception as e:
-            print(f"スクレイピングエラー: {e}")
-            raise
+            print(f"Error scraping data from FiNANCiE: {e}")
+            return None
         finally:
             browser.close()
 
-def get_last_stats() -> tuple[int | None, float | None, int | None]:
-    """CSVから最新の統計データを読み込む"""
-    if not CSV_PATH.exists():
-        return None, None, None
-    with open(CSV_PATH, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        header = next(reader, None)  # ヘッダーを読み込む
-        if not header:
-            return None, None, None
+def read_stats_csv(file_path):
+    """stats.csvを読み込む。ファイルが存在しない場合は新しいDataFrameを作成する"""
+    try:
+        return pd.read_csv(file_path)
+    except FileNotFoundError:
+        return pd.DataFrame(columns=["date", "members"])
 
-        # ヘッダーから列のインデックスを取得
-        try:
-            date_idx = header.index('date')
-            followers_idx = header.index('followers')
-            price_idx = header.index('price_jpy')
-            # token_supply列は存在しない可能性を考慮
-            token_supply_idx = header.index('token_supply') if 'token_supply' in header else -1
-        except ValueError as e:
-            print(f"CSVヘッダーエラー: {e}")
-            return None, None, None
+def calculate_diffs(current_data, yesterday_data):
+    """前日比を計算する"""
+    if yesterday_data is not None:
+        member_diff = current_data["owner_count"] - yesterday_data["members"]
+    else:
+        member_diff = 0
+    return member_diff
 
-        # 日付ごとの最新データを格納する辞書
-        daily_stats = {}
-        for row in reader:
-            try:
-                date_str = row[date_idx]
-                members = int(row[followers_idx])
-                price = float(row[price_idx])
-                token_supply = int(row[token_supply_idx]) if token_supply_idx != -1 and len(row) > token_supply_idx and row[token_supply_idx] else None
-                daily_stats[date_str] = (members, price, token_supply)
-            except (ValueError, IndexError) as e:
-                print(f"CSVの行の解析エラー: {row}, エラー: {e}")
-                continue
-
-        if not daily_stats:
-            return None, None, None
-
-        # 日付をソートして最新の日付と前日の日付を取得
-        sorted_dates = sorted(daily_stats.keys())
+def update_stats_csv(df, file_path, today_str, current_data):
+    """stats.csvを更新または新規書き込みする"""
+    today_data_row = {
+        "date": today_str,
+        "members": current_data["owner_count"],
+    }
+    
+    if today_str in df["date"].values:
+        df.loc[df["date"] == today_str, ["members"]] = [today_data_row["members"]]
+    else:
+        new_df = pd.DataFrame([today_data_row])
+        df = pd.concat([df, new_df], ignore_index=True)
         
-        # 前日の日付のデータを取得
-        if len(sorted_dates) >= 2:
-            previous_date = sorted_dates[-2]
-            return daily_stats.get(previous_date, (None, None, None))
-        elif len(sorted_dates) == 1:
-             # データが1つしかない場合は、それを返す（前日比は計算されない）
-            return daily_stats[sorted_dates[0]]
-        else:
-            return None, None, None
+    df.to_csv(file_path, index=False)
 
-def post_to_discord(message: str):
-    """Discord Webhook へメッセージを投稿"""
-    if not DISCORD_WEBHOOK:
-        print("Discord Webhook URL is not set. Skipping.")
+def format_discord_message(post_time, current_data, diffs):
+    """Discordへの投稿メッセージを作成する"""
+    member_diff = diffs
+    message = f"""◆FiNANCiE開運オロチトークン現在情報（{post_time.strftime('%Y年 %m月%d日 %H:%M時点')}）
+・メンバー数 {current_data["owner_count"]:,}人（前日比 {member_diff:+,}人）
+#CNPオロチ #開運オロチ
+"""
+    return message
+
+def send_discord_notification(webhook_url, message):
+    """Discordにメッセージを投稿する"""
+    if not webhook_url:
+        print("DISCORD_WEBHOOK_URL is not set.")
         return
     try:
-        requests.post(DISCORD_WEBHOOK, json={'content': message})
+        response = requests.post(webhook_url, json={"content": message})
+        response.raise_for_status()
+        print("Successfully sent notification to Discord.")
     except requests.exceptions.RequestException as e:
-        print(f"Discord Error: {e}")
+        print(f"Error sending notification to Discord: {e}")
 
 def main():
     """メイン処理"""
-    today_str = datetime.now(JST).strftime('%Y-%m-%d')
+    JST = timezone(timedelta(hours=+9), 'JST')
+    now = datetime.now(JST)
+    today_str = now.strftime('%Y-%m-%d')
 
-    try:
-        members, price, token_supply = get_financie_stats_with_playwright()
-    except Exception:
+    financie_data = get_financie_data_from_web()
+    if not financie_data:
         return
 
-    last_f, last_p, last_ts = get_last_stats()
+    df = read_stats_csv(STATS_CSV_PATH)
+    
+    yesterday_data = None
+    if not df.empty:
+        df['date'] = pd.to_datetime(df['date'])
+        df_past = df[df['date'] < pd.to_datetime(today_str)].copy()
+        
+        if not df_past.empty:
+            df_past.sort_values(by='date', ascending=False, inplace=True)
+            yesterday_data = df_past.iloc[0]
+        
+        df['date'] = df['date'].dt.strftime('%Y-%m-%d')
 
-    diff_f = f"{members - last_f:+,}" if last_f is not None else "―"
-    diff_p = f"{price - last_p:+.4f}" if last_p is not None else "―"
-    diff_ts = f"{token_supply - last_ts:+,}" if last_ts is not None else "―"
-
-    message = f"""◆FiNANCiE開運オロチトークン現在情報（{datetime.now(JST).strftime('%Y年%_m月%_d日 %H:%M')}時点）
-・メンバー数 {members:,}人（前日比 {diff_f}人）
-・トークン価格 {price:.4f}円（前日比 {diff_p}円）
-・トークン在庫 {token_supply:,}枚（前日比 {diff_ts}枚）
-#CNPオロチ #開運オロチ"""
+    diffs = calculate_diffs(financie_data, yesterday_data)
+    
+    update_stats_csv(df, STATS_CSV_PATH, today_str, financie_data)
+    
+    post_time_fixed = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    message = format_discord_message(post_time_fixed, financie_data, diffs)
+    
+    print("Generated message:")
     print(message)
+    
+    send_discord_notification(DISCORD_WEBHOOK_URL, message)
 
-    post_to_discord(message)
-
-    file_exists = CSV_PATH.exists()
-    with open(CSV_PATH, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(['date', 'followers', 'price_jpy', 'token_supply'])
-        writer.writerow([today_str, members, price, token_supply])
-    print(f"Successfully saved data to {CSV_PATH}")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
