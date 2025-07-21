@@ -9,34 +9,68 @@ import requests
 # 環境変数の読み込み
 load_dotenv()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-FINANCIE_URL = "https://financie.jp/communities/orochi_cnp/"
+FINANCIE_COMMUNITY_URL = "https://financie.jp/communities/orochi_cnp/"
+FINANCIE_MARKET_URL = "https://financie.jp/communities/orochi_cnp/market"
 STATS_CSV_PATH = "stats.csv"
 
 def get_financie_data_from_web():
-    """FiNANCiEのWebページからメンバー数を取得する"""
+    """FiNANCiEのWebページからメンバー数、トークン価格、トークン在庫を取得する"""
     print("Starting web scraping...")
+    data = {}
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
         try:
-            print(f"Navigating to {FINANCIE_URL}")
-            page.goto(FINANCIE_URL, timeout=60000)
-            html_content = page.content()
-            print("Successfully fetched page content.")
-            # print(f"HTML Content: {html_content[:500]}...") # HTMLの先頭500文字をログ出力
-
-            # メンバー数の要素を取得
+            # メンバー数を取得 (コミュニティページから)
+            print(f"Navigating to community page: {FINANCIE_COMMUNITY_URL}")
+            page.goto(FINANCIE_COMMUNITY_URL, timeout=60000)
             member_element = page.query_selector(".profile_databox .profile_num")
             if member_element:
                 member_text = member_element.inner_text()
-                print(f"Raw member text found: {member_text}")
-                # 数字のみを抽出
                 members = int(re.sub(r'[^0-9]', '', member_text))
+                data["owner_count"] = members
                 print(f"Parsed member count: {members}")
-                return {"owner_count": members}
             else:
-                print("Could not find member count element. Check selector.")
+                print("Could not find member count element on community page.")
+
+            # マーケットページからトークン価格とトークン在庫を取得
+            print(f"Navigating to market page: {FINANCIE_MARKET_URL}")
+            page.goto(FINANCIE_MARKET_URL, timeout=60000)
+            # ページが完全にロードされるのを待つ（例: 特定の要素が表示されるまで待つ）
+            page.wait_for_selector("body") # 少なくともbodyタグがロードされるまで待つ
+
+            # トークン価格の取得 (仮のセレクタ)
+            # 実際のセレクタはマーケットページのHTMLを検査して特定する必要がある
+            # ここでは仮に、価格が表示されている可能性のある要素を探す
+            price_element = page.query_selector("span.price") # 仮のセレクタ
+            if price_element:
+                price_text = price_element.inner_text()
+                price = float(re.sub(r'[^\d.]', '', price_text)) # 数字と小数点のみ抽出
+                data["token_price"] = price
+                print(f"Parsed token price: {price}")
+            else:
+                print("Could not find token price element on market page. Trying other selectors.")
+                # 別のセレクタを試すなど、より堅牢なロジックが必要になる可能性
+                # 例: page.query_selector("div.token-price-display")
+
+            # トークン在庫の取得 (仮のセレクタ)
+            # 実際のセレクタはマーケットページのHTMLを検査して特定する必要がある
+            stock_element = page.query_selector("span.stock") # 仮のセレクタ
+            if stock_element:
+                stock_text = stock_element.inner_text()
+                stock = int(re.sub(r'[^0-9]', '', stock_text)) # 数字のみ抽出
+                data["token_stock"] = stock
+                print(f"Parsed token stock: {stock}")
+            else:
+                print("Could not find token stock element on market page. Trying other selectors.")
+                # 例: page.query_selector("div.token-supply")
+
+            if data.get("owner_count") is not None and data.get("token_price") is not None and data.get("token_stock") is not None:
+                return data
+            else:
+                print("Failed to get all required data (member count, token price, or token stock). Some data might be missing or selectors are incorrect.")
                 return None
+
         except Exception as e:
             print(f"Error scraping data from FiNANCiE: {e}")
             return None
@@ -49,44 +83,60 @@ def read_stats_csv(file_path):
     try:
         df = pd.read_csv(file_path)
         print(f"Successfully read {file_path}. Head:\n{df.head()}")
+        # 既存のCSVにpriceとstockカラムがない場合を考慮
+        if "price" not in df.columns:
+            df["price"] = 0.0
+        if "stock" not in df.columns:
+            df["stock"] = 0
         return df
     except FileNotFoundError:
-        print(f"{file_path} not found. Creating new DataFrame.")
-        return pd.DataFrame(columns=["date", "members"])
+        print(f"{file_path} not found. Creating new DataFrame with all columns.")
+        return pd.DataFrame(columns=["date", "members", "price", "stock"])
 
 def calculate_diffs(current_data, yesterday_data):
     """前日比を計算する"""
+    member_diff = 0
+    price_diff = 0.0
+    stock_diff = 0
+
     if yesterday_data is not None:
         member_diff = current_data["owner_count"] - yesterday_data["members"]
-        print(f"Calculated member diff: {member_diff}")
+        price_diff = current_data["token_price"] - yesterday_data["price"]
+        stock_diff = current_data["token_stock"] - yesterday_data["stock"]
+        print(f"Calculated diffs: members={member_diff}, price={price_diff}, stock={stock_diff}")
     else:
-        member_diff = 0
-        print("No yesterday's data found. Member diff set to 0.")
-    return member_diff
+        print("No yesterday's data found. Diffs set to 0.")
+    return member_diff, price_diff, stock_diff
 
 def update_stats_csv(df, file_path, today_str, current_data):
     """stats.csvを更新または新規書き込みする"""
     today_data_row = {
         "date": today_str,
         "members": current_data["owner_count"],
+        "price": current_data["token_price"],
+        "stock": current_data["token_stock"]
     }
-    
+
     if today_str in df["date"].values:
-        df.loc[df["date"] == today_str, ["members"]] = [today_data_row["members"]]
+        df.loc[df["date"] == today_str, ["members", "price", "stock"]] = [\
+            today_data_row["members"], today_data_row["price"], today_data_row["stock"]\
+        ]
         print(f"Updated existing entry for {today_str} in {file_path}.")
     else:
         new_df = pd.DataFrame([today_data_row])
         df = pd.concat([df, new_df], ignore_index=True)
         print(f"Added new entry for {today_str} to {file_path}.")
-        
+
     df.to_csv(file_path, index=False)
     print(f"Saved {file_path}. Tail:\n{df.tail()}")
 
 def format_discord_message(post_time, current_data, diffs):
     """Discordへの投稿メッセージを作成する"""
-    member_diff = diffs
+    member_diff, price_diff, stock_diff = diffs
     message = f"""◆FiNANCiE開運オロチトークン現在情報（{post_time.strftime('%Y年 %m月%d日 %H:%M時点')}）
 ・メンバー数 {current_data["owner_count"]:,}人（前日比 {member_diff:+,}人）
+・トークン価格 {current_data["token_price"]:.4f}円（前日比 {price_diff:+.4f}円）
+・トークン在庫 {current_data["token_stock"]:,}枚（前日比 {stock_diff:+,}枚）
 #CNPオロチ #開運オロチ
 """
     print(f"Formatted Discord message:\n{message}")
@@ -118,28 +168,28 @@ def main():
         return
 
     df = read_stats_csv(STATS_CSV_PATH)
-    
+
     yesterday_data = None
     if not df.empty:
         df['date'] = pd.to_datetime(df['date'])
         df_past = df[df['date'] < pd.to_datetime(today_str)].copy()
-        
+
         if not df_past.empty:
             df_past.sort_values(by='date', ascending=False, inplace=True)
             yesterday_data = df_past.iloc[0]
             print(f"Yesterday's data: {yesterday_data.to_dict()}")
         else:
             print("No past data found for yesterday's calculation.")
-        
+
         df['date'] = df['date'].dt.strftime('%Y-%m-%d')
 
     diffs = calculate_diffs(financie_data, yesterday_data)
-    
+
     update_stats_csv(df, STATS_CSV_PATH, today_str, financie_data)
-    
+
     post_time_fixed = now.replace(hour=6, minute=0, second=0, microsecond=0)
     message = format_discord_message(post_time_fixed, financie_data, diffs)
-    
+
     send_discord_notification(DISCORD_WEBHOOK_URL, message)
     print("Script finished.")
 
