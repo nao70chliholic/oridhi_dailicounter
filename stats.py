@@ -37,33 +37,30 @@ def get_financie_data_from_web():
             print(f"Navigating to market page: {FINANCIE_MARKET_URL}")
             page.goto(FINANCIE_MARKET_URL, timeout=60000)
             # ページが完全にロードされるのを待つ（例: 特定の要素が表示されるまで待つ）
-            page.wait_for_selector("body") # 少なくともbodyタグがロードされるまで待つ
+            page.wait_for_selector(".p-market-overview__data-area") # データが表示されるエリアを待つ
 
-            # トークン価格の取得 (仮のセレクタ)
-            # 実際のセレクタはマーケットページのHTMLを検査して特定する必要がある
-            # ここでは仮に、価格が表示されている可能性のある要素を探す
-            price_element = page.query_selector("span.price") # 仮のセレクタ
-            if price_element:
-                price_text = price_element.inner_text()
-                price = float(re.sub(r'[^\d.]', '', price_text)) # 数字と小数点のみ抽出
-                data["token_price"] = price
-                print(f"Parsed token price: {price}")
-            else:
-                print("Could not find token price element on market page. Trying other selectors.")
-                # 別のセレクタを試すなど、より堅牢なロジックが必要になる可能性
-                # 例: page.query_selector("div.token-price-display")
-
-            # トークン在庫の取得 (仮のセレクタ)
-            # 実際のセレクタはマーケットページのHTMLを検査して特定する必要がある
-            stock_element = page.query_selector("span.stock") # 仮のセレクタ
-            if stock_element:
-                stock_text = stock_element.inner_text()
-                stock = int(re.sub(r'[^0-9]', '', stock_text)) # 数字のみ抽出
+            # トークン在庫の取得
+            stock_int_part_element = page.query_selector(".selling_stock .connector-instock .currency.int-part")
+            if stock_int_part_element:
+                stock_text = stock_int_part_element.inner_text()
+                stock = int(re.sub(r'[^0-9]', '', stock_text))
                 data["token_stock"] = stock
                 print(f"Parsed token stock: {stock}")
             else:
-                print("Could not find token stock element on market page. Trying other selectors.")
-                # 例: page.query_selector("div.token-supply")
+                print("Could not find token stock element on market page.")
+
+            # トークン価格の取得
+            price_int_part_element = page.query_selector(".js-bancor-latest-price .connector-price .currency.int-part")
+            price_float_part_element = page.query_selector(".js-bancor-latest-price .connector-price .currency.float-part")
+
+            if price_int_part_element and price_float_part_element:
+                price_int = re.sub(r'[^0-9]', '', price_int_part_element.inner_text())
+                price_float = re.sub(r'[^0-9.]', '', price_float_part_element.inner_text())
+                price = float(f"{price_int}{price_float}")
+                data["token_price"] = price
+                print(f"Parsed token price: {price}")
+            else:
+                print("Could not find token price element on market page.")
 
             if data.get("owner_count") is not None and data.get("token_price") is not None and data.get("token_stock") is not None:
                 return data
