@@ -28,7 +28,9 @@ jobs:
         run: playwright install --with-deps chromium
 
       - name: Clean up stats.csv
-        run: rm -f stats.csv
+        run: |
+          rm -f stats.csv
+          ls -l stats.csv || echo "stats.csv does not exist, as expected."
 
       - name: Run script
         env:
