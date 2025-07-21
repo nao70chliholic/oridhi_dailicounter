@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # この行を追加
 
     steps:
       - uses: actions/checkout@v4
