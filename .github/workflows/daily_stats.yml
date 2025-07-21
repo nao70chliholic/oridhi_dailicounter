@@ -35,7 +35,7 @@ jobs:
       - name: Run script
         env:
           FINANCIE_COMM_ID: ${{ secrets.FINANCIE_COMM_ID }}
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK }}
         run: python stats.py
 
       - name: Commit and push if changed
