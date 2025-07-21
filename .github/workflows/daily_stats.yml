@@ -27,6 +27,9 @@ jobs:
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
 
+      - name: Clean up stats.csv
+        run: rm -f stats.csv
+
       - name: Run script
         env:
           FINANCIE_COMM_ID: ${{ secrets.FINANCIE_COMM_ID }}
