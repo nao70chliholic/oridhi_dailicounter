@@ -1,23 +1,125 @@
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
+
+try:
+    from playwright.sync_api import Error as PlaywrightError, sync_playwright
+except ImportError:  # Playwrightがインストールされていない場合でもフォールバックできるようにする
+    PlaywrightError = Exception  # type: ignore[assignment]
+    sync_playwright = None  # type: ignore[assignment]
 
 # --- 定数定義 ---
 load_dotenv()
-DISCORD_WEBHOOK_URL: Optional[str] = os.getenv("DISCORD_WEBHOOK_URL")
+DISCORD_WEBHOOK_URL: Optional[str] = os.getenv("DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK")
 FINANCIE_COMMUNITY_URL: str = "https://financie.jp/communities/orochi_cnp/"
 FINANCIE_MARKET_URL: str = "https://financie.jp/communities/orochi_cnp/market"
+FINANCIE_BANCOR_API: str = "https://financie.jp/api/charts/bancor/{connector_address}/day"
 STATS_CSV_PATH: str = "stats.csv"
+CONNECTOR_INPUT_SELECTOR: str = "#gtm-connector-address"
+WEI_DECIMAL = Decimal("1e18")
 
 # --- 型定義 ---
 FinancieData = Dict[str, int | float]
 DiffData = Tuple[int, float, int]
+
+
+def _parse_int(text: str) -> Optional[int]:
+    cleaned = re.sub(r"[^0-9]", "", text)
+    return int(cleaned) if cleaned else None
+
+
+def _parse_float(text: str) -> Optional[float]:
+    cleaned = re.sub(r"[^0-9.,]", "", text).replace(",", "")
+    try:
+        return float(cleaned) if cleaned else None
+    except ValueError:
+        return None
+
+
+def _fetch_financie_data_with_requests() -> Optional[FinancieData]:
+    session = requests.Session()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja,en;q=0.9",
+    }
+    try:
+        community_res = session.get(FINANCIE_COMMUNITY_URL, headers=headers, timeout=30)
+        community_res.raise_for_status()
+        market_res = session.get(FINANCIE_MARKET_URL, headers=headers, timeout=30)
+        market_res.raise_for_status()
+    except requests.RequestException as e:
+        print(f"Error fetching FiNANCiE pages via HTTP: {e}")
+        return None
+
+    data: Dict[str, int | float] = {}
+    community_soup = BeautifulSoup(community_res.text, "lxml")
+    connector_input = community_soup.select_one(CONNECTOR_INPUT_SELECTOR)
+    connector_address = connector_input["value"] if connector_input and connector_input.get("value") else None
+    if not connector_address:
+        print(f"[HTTP] Failed to find connector address with selector '{CONNECTOR_INPUT_SELECTOR}'.")
+        return None
+
+    market_soup = BeautifulSoup(market_res.text, "lxml")
+
+    member_element = community_soup.select_one(".profile_databox .profile_num")
+    if member_element and (members := _parse_int(member_element.get_text())) is not None:
+        data["owner_count"] = members
+        print(f"[HTTP] Parsed member count: {members}")
+
+    market_data = _fetch_market_data_via_api(session, headers, connector_address)
+    if market_data:
+        data.update(market_data)
+
+    required_keys = {"owner_count", "token_price", "token_stock"}
+    if required_keys <= data.keys():
+        return data
+
+    missing_keys = required_keys - set(data.keys())
+    print(f"[HTTP] Failed to get all required data. Missing: {missing_keys}.")
+    return None
+
+
+def _fetch_market_data_via_api(
+    session: requests.Session, headers: Dict[str, str], connector_address: str
+) -> Optional[FinancieData]:
+    url = FINANCIE_BANCOR_API.format(connector_address=connector_address)
+    try:
+        response = session.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"[HTTP] Error fetching market API ({url}): {e}")
+        return None
+
+    try:
+        raw_price = Decimal(payload["bancor"]["latest_price"])
+        raw_stock = Decimal(payload["market"]["stock"])
+    except (KeyError, InvalidOperation, TypeError) as e:
+        print(f"[HTTP] Market API payload missing expected fields: {e}")
+        return None
+
+    price_decimal = (raw_price / WEI_DECIMAL).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    stock_decimal = raw_stock / WEI_DECIMAL
+
+    price = float(price_decimal)
+    stock = int(stock_decimal)
+
+    print(f"[HTTP] Parsed token price from API: {price}")
+    print(f"[HTTP] Parsed token stock from API: {stock}")
+    return {
+        "token_price": price,
+        "token_stock": stock,
+    }
 
 
 def get_financie_data_from_web() -> Optional[FinancieData]:
@@ -27,62 +129,74 @@ def get_financie_data_from_web() -> Optional[FinancieData]:
     トークン価格と在庫数を取得します。
     """
     print("Starting web scraping...")
+    data = _fetch_financie_data_with_playwright()
+    if data:
+        return data
+
+    print("Playwright scraping failed or returned incomplete data. Falling back to HTTP scraping.")
+    return _fetch_financie_data_with_requests()
+
+
+def _fetch_financie_data_with_playwright() -> Optional[FinancieData]:
+    if sync_playwright is None:
+        print("Playwright is not available. Skipping Playwright scraping.")
+        return None
+
     data: Dict[str, int | float] = {}
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        try:
-            # メンバー数を取得
-            print(f"Navigating to community page: {FINANCIE_COMMUNITY_URL}")
-            page.goto(FINANCIE_COMMUNITY_URL, timeout=60000)
-            member_element = page.query_selector(".profile_databox .profile_num")
-            if member_element:
-                members = int(re.sub(r'[^0-9]', '', member_element.inner_text()))
-                data["owner_count"] = members
-                print(f"Parsed member count: {members}")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                print(f"Navigating to community page: {FINANCIE_COMMUNITY_URL}")
+                page.goto(FINANCIE_COMMUNITY_URL, timeout=60000)
+                member_element = page.query_selector(".profile_databox .profile_num")
+                if member_element:
+                    members = int(re.sub(r"[^0-9]", "", member_element.inner_text()))
+                    data["owner_count"] = members
+                    print(f"Parsed member count: {members}")
 
-            # トークン価格と在庫を取得
-            print(f"Navigating to market page: {FINANCIE_MARKET_URL}")
-            page.goto(FINANCIE_MARKET_URL, timeout=60000)
-            
-            # JavaScriptによる価格情報の動的な読み込みを確実待つように変更
-            price_selector = ".js-bancor-latest-price .connector-price"
-            print(f"Waiting for price element ('{price_selector}') to be visible...")
-            page.wait_for_selector(price_selector, timeout=30000)
-            print("Price element is visible.")
+                print(f"Navigating to market page: {FINANCIE_MARKET_URL}")
+                page.goto(FINANCIE_MARKET_URL, timeout=60000)
 
-            stock_element = page.query_selector(".selling_stock .connector-instock .currency.int-part")
-            if stock_element:
-                stock = int(re.sub(r'[^0-9]', '', stock_element.inner_text()))
-                data["token_stock"] = stock
-                print(f"Parsed token stock: {stock}")
+                price_selector = ".js-bancor-latest-price .connector-price"
+                print(f"Waiting for price element ('{price_selector}') to be visible...")
+                page.wait_for_selector(price_selector, timeout=30000)
+                print("Price element is visible.")
 
-            price_int_element = page.query_selector(".js-bancor-latest-price .connector-price .currency.int-part")
-            price_float_element = page.query_selector(".js-bancor-latest-price .connector-price .currency.float-part")
-            
-            if price_int_element:
-                # 正規表現で数値とドットのみを抽出
-                price_str = re.sub(r'[^0-9.]', '', price_int_element.inner_text())
-                if price_float_element and price_float_element.inner_text():
-                     price_str += price_float_element.inner_text()
-                
-                price = float(price_str)
-                data["token_price"] = price
-                print(f"Parsed token price: {price}")
+                stock_element = page.query_selector(".selling_stock .connector-instock .currency.int-part")
+                if stock_element:
+                    stock = int(re.sub(r"[^0-9]", "", stock_element.inner_text()))
+                    data["token_stock"] = stock
+                    print(f"Parsed token stock: {stock}")
 
-            if "owner_count" in data and "token_price" in data and "token_stock" in data:
-                return data
-            else:
-                missing_keys = {"owner_count", "token_price", "token_stock"} - set(data.keys())
+                price_int_element = page.query_selector(".js-bancor-latest-price .connector-price .currency.int-part")
+                price_float_element = page.query_selector(
+                    ".js-bancor-latest-price .connector-price .currency.float-part"
+                )
+
+                if price_int_element:
+                    price_str = re.sub(r"[^0-9.]", "", price_int_element.inner_text())
+                    if price_float_element and price_float_element.inner_text():
+                        price_str += price_float_element.inner_text()
+
+                    price = float(price_str)
+                    data["token_price"] = price
+                    print(f"Parsed token price: {price}")
+
+                required_keys = {"owner_count", "token_price", "token_stock"}
+                if required_keys <= data.keys():
+                    return data
+
+                missing_keys = required_keys - set(data.keys())
                 print(f"Failed to get all required data. Missing: {missing_keys}. Selectors might be incorrect.")
                 return None
-
-        except Exception as e:
-            print(f"Error scraping data from FiNANCiE: {e}")
-            return None
-        finally:
-            browser.close()
-            print("Browser closed.")
+            finally:
+                browser.close()
+                print("Browser closed.")
+    except PlaywrightError as e:
+        print(f"Error scraping data from FiNANCiE with Playwright: {e}")
+        return None
 
 
 def read_stats_csv(file_path: str) -> pd.DataFrame:
@@ -127,6 +241,8 @@ def update_stats_csv(df: pd.DataFrame, file_path: str, today_str: str, current_d
         "stock": current_data["token_stock"]
     }
 
+    df["date"] = df["date"].astype(str).str.strip()
+
     if today_str in df["date"].values:
         df.loc[df["date"] == today_str, list(today_data_row.keys())] = list(today_data_row.values())
         print(f"Updated existing entry for {today_str} in {file_path}.")
@@ -134,6 +250,9 @@ def update_stats_csv(df: pd.DataFrame, file_path: str, today_str: str, current_d
         new_df = pd.DataFrame([today_data_row])
         df = pd.concat([df, new_df], ignore_index=True)
         print(f"Added new entry for {today_str} to {file_path}.")
+
+    df = df.drop_duplicates(subset="date", keep="last")
+    df = df.sort_values(by="date").reset_index(drop=True)
 
     df.to_csv(file_path, index=False)
     print(f"Saved {file_path}. Tail:\n{df.tail()}")
@@ -189,15 +308,38 @@ def main() -> None:
 
     yesterday_data: Optional[pd.Series] = None
     if not df.empty:
-        df['date_dt'] = pd.to_datetime(df['date'])
-        df_past = df[df['date_dt'] < pd.to_datetime(today_str)].copy()
+        df['date_stripped'] = df['date'].astype(str).str.strip()
+        df['date_dt'] = pd.to_datetime(df['date_stripped'], errors='coerce', format='mixed')
+        invalid_dates = df[df['date_dt'].isna()]
+        if not invalid_dates.empty:
+            print(
+                "Warning: Found rows with unparseable dates. Excluding them from diff calculation: "
+                f"{invalid_dates['date'].tolist()}"
+            )
+
+        df_valid = df[df['date_dt'].notna()].copy()
+        df_valid['date_dt'] = df_valid['date_dt'].dt.normalize()
+        df_valid = df_valid.sort_values(by='date_dt')
+
+        today_dt = pd.to_datetime(today_str).normalize()
+        df_past = df_valid[df_valid['date_dt'] < today_dt]
 
         if not df_past.empty:
-            yesterday_data = df_past.sort_values(by='date_dt', ascending=False).iloc[0]
-            print(f"Found yesterday's data ({yesterday_data['date']}): {yesterday_data.to_dict()}")
+            latest_available = df_past.iloc[-1]
+            gap_days = (today_dt - latest_available['date_dt']).days
+
+            if gap_days == 1:
+                yesterday_data = latest_available
+                print(f"Using yesterday's data ({yesterday_data['date']}): {yesterday_data.to_dict()}")
+            else:
+                print(
+                    "Most recent stats entry is from "
+                    f"{latest_available['date']} ({gap_days} day(s) old). "
+                    "Treating diffs as zero to avoid misleading previous-day comparisons."
+                )
         else:
             print("No past data found for yesterday's calculation.")
-        df = df.drop(columns=['date_dt'])
+        df = df.drop(columns=['date_dt', 'date_stripped'])
 
     diffs = calculate_diffs(financie_data, yesterday_data)
 
