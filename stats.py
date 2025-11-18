@@ -2,7 +2,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import pandas as pd
 import requests
@@ -26,8 +26,68 @@ CONNECTOR_INPUT_SELECTOR: str = "#gtm-connector-address"
 WEI_DECIMAL = Decimal("1e18")
 
 # --- 型定義 ---
-FinancieData = Dict[str, int | float]
+FinancieData = Dict[str, Union[int, float]]
 DiffData = Tuple[int, float, int]
+
+
+def _load_manual_yesterday_entry(now: datetime) -> Optional[Dict[str, Union[int, float, str]]]:
+    """
+    環境変数に手動で前日データが指定されている場合、その値を読み込んで返します。
+    すべての値（メンバー数・価格・在庫）が揃っていない場合や日付が不正な場合はNoneを返します。
+    """
+    manual_members = os.getenv("MANUAL_YESTERDAY_MEMBERS")
+    manual_price = os.getenv("MANUAL_YESTERDAY_PRICE")
+    manual_stock = os.getenv("MANUAL_YESTERDAY_STOCK")
+    manual_date_str = os.getenv("MANUAL_YESTERDAY_DATE")
+
+    if not any([manual_members, manual_price, manual_stock, manual_date_str]):
+        return None
+
+    missing = [
+        name
+        for name, value in [
+            ("MANUAL_YESTERDAY_MEMBERS", manual_members),
+            ("MANUAL_YESTERDAY_PRICE", manual_price),
+            ("MANUAL_YESTERDAY_STOCK", manual_stock),
+        ]
+        if not value
+    ]
+    if missing:
+        print(
+            "[ManualYesterday] 環境変数が不足しています。以下をすべて設定してください: "
+            + ", ".join(missing)
+        )
+        return None
+
+    if manual_date_str:
+        try:
+            manual_date = datetime.strptime(manual_date_str, "%Y-%m-%d")
+        except ValueError:
+            print("[ManualYesterday] MANUAL_YESTERDAY_DATE は YYYY-MM-DD 形式で指定してください。")
+            return None
+    else:
+        manual_date = now - timedelta(days=1)
+
+    if manual_date.date() >= now.date():
+        print("[ManualYesterday] 手動データの日付は今日より前の日付を指定してください。")
+        return None
+
+    try:
+        members = int(manual_members)
+        price = float(manual_price)
+        stock = int(manual_stock)
+    except ValueError as exc:
+        print(f"[ManualYesterday] 手動データの形式に問題があります: {exc}")
+        return None
+
+    manual_entry = {
+        "date": manual_date.strftime("%Y-%m-%d"),
+        "members": members,
+        "price": price,
+        "stock": stock,
+    }
+    print(f"[ManualYesterday] {manual_entry['date']} の手動データを使用します: {manual_entry}")
+    return manual_entry
 
 
 def _parse_int(text: str) -> Optional[int]:
@@ -61,7 +121,7 @@ def _fetch_financie_data_with_requests() -> Optional[FinancieData]:
         print(f"Error fetching FiNANCiE pages via HTTP: {e}")
         return None
 
-    data: Dict[str, int | float] = {}
+    data: Dict[str, Union[int, float]] = {}
     community_soup = BeautifulSoup(community_res.text, "lxml")
     connector_input = community_soup.select_one(CONNECTOR_INPUT_SELECTOR)
     connector_address = connector_input["value"] if connector_input and connector_input.get("value") else None
@@ -142,7 +202,7 @@ def _fetch_financie_data_with_playwright() -> Optional[FinancieData]:
         print("Playwright is not available. Skipping Playwright scraping.")
         return None
 
-    data: Dict[str, int | float] = {}
+    data: Dict[str, Union[int, float]] = {}
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -259,6 +319,24 @@ def update_stats_csv(df: pd.DataFrame, file_path: str, today_str: str, current_d
     return df
 
 
+def apply_manual_yesterday_if_needed(df: pd.DataFrame, file_path: str, now: datetime) -> pd.DataFrame:
+    """
+    環境変数で指定された前日データがあればCSVに反映します。
+    """
+    manual_entry = _load_manual_yesterday_entry(now)
+    if not manual_entry:
+        return df
+
+    manual_financie_data: FinancieData = {
+        "owner_count": manual_entry["members"],
+        "token_price": manual_entry["price"],
+        "token_stock": manual_entry["stock"],
+    }
+    df = update_stats_csv(df, file_path, manual_entry["date"], manual_financie_data)
+    print("[ManualYesterday] CSVを手動データで更新しました。")
+    return df
+
+
 def format_discord_message(post_time: datetime, current_data: FinancieData, diffs: DiffData) -> str:
     """
     Discordに投稿するためのメッセージ文字列をフォーマットします。
@@ -305,6 +383,7 @@ def main() -> None:
         return
 
     df = read_stats_csv(STATS_CSV_PATH)
+    df = apply_manual_yesterday_if_needed(df, STATS_CSV_PATH, now)
 
     yesterday_data: Optional[pd.Series] = None
     if not df.empty:
@@ -328,14 +407,14 @@ def main() -> None:
             latest_available = df_past.iloc[-1]
             gap_days = (today_dt - latest_available['date_dt']).days
 
+            yesterday_data = latest_available
             if gap_days == 1:
-                yesterday_data = latest_available
                 print(f"Using yesterday's data ({yesterday_data['date']}): {yesterday_data.to_dict()}")
             else:
                 print(
                     "Most recent stats entry is from "
                     f"{latest_available['date']} ({gap_days} day(s) old). "
-                    "Treating diffs as zero to avoid misleading previous-day comparisons."
+                    "Using it for diff calculation."
                 )
         else:
             print("No past data found for yesterday's calculation.")
