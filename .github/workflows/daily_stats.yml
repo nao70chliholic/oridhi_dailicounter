@@ -29,7 +29,9 @@ jobs:
 
       - name: Run script to update stats and post to Discord
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Prefer GitHub Actions Secrets. Supports both secret names for backward compatibility.
+          # vars.DISCORD_WEBHOOK_URL is a last-resort fallback (not recommended; it's not a secret).
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL || secrets.DISCORD_WEBHOOK || vars.DISCORD_WEBHOOK_URL }}
         run: python stats.py
 
       - name: Commit and push if changed
