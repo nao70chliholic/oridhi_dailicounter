@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -370,14 +371,82 @@ def send_discord_notification(webhook_url: Optional[str], message: str) -> None:
         print(f"Error sending notification to Discord: {e}")
 
 
-def main() -> None:
-    """
-    メイン処理。
-    """
-    print("Script started.")
-    JST = timezone(timedelta(hours=+9), 'JST')
-    now = datetime.now(JST)
-    today_str = now.strftime('%Y-%m-%d')
+def _get_latest_row_for_date(df: pd.DataFrame, target_date: date) -> Optional[pd.Series]:
+    target_str = target_date.strftime("%Y-%m-%d")
+    if df.empty or "date" not in df.columns:
+        return None
+
+    date_series = df["date"].astype(str).str.strip()
+    matches = df[date_series == target_str]
+    if matches.empty:
+        return None
+    return matches.iloc[-1]
+
+
+def format_weekly_discord_message(report_date: date, current_row: pd.Series, previous_row: pd.Series) -> str:
+    member_diff = int(current_row["members"] - previous_row["members"])
+    price_diff = float(current_row["price"] - previous_row["price"])
+    stock_diff = int(current_row["stock"] - previous_row["stock"])
+
+    message = f"""◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）
+・メンバー数 {int(current_row["members"]):,}人（前週比 {member_diff:+,}人）
+・トークン価格 {float(current_row["price"]):.4f}円（前週比 {price_diff:+.4f}円）
+・トークン在庫 {int(current_row["stock"]):,}枚（前週比 {stock_diff:+,}枚）
+#CNPオロチ #開運オロチ
+"""
+    print(f"Formatted weekly Discord message:\n{message}")
+    return message
+
+
+def _format_weekly_error_message(report_date: date, missing_dates: list[date]) -> str:
+    missing = ", ".join(d.strftime("%Y-%m-%d") for d in missing_dates)
+    message = f"""◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）
+【週報エラー】stats.csv に必要なデータがありません（不足: {missing}）
+#CNPオロチ #開運オロチ
+"""
+    print(f"Formatted weekly error message:\n{message}")
+    return message
+
+
+def run_weekly_report(now: datetime) -> int:
+    df = read_stats_csv(STATS_CSV_PATH)
+
+    # Weekly report compares Saturday vs previous Saturday.
+    report_date = now.date() - timedelta(days=(now.date().weekday() - 5) % 7)
+    previous_date = report_date - timedelta(days=7)
+    print(f"Weekly report dates: report={report_date}, previous={previous_date}")
+
+    current_row = _get_latest_row_for_date(df, report_date)
+    previous_row = _get_latest_row_for_date(df, previous_date)
+
+    missing_dates: list[date] = []
+    if current_row is None:
+        missing_dates.append(report_date)
+    if previous_row is None:
+        missing_dates.append(previous_date)
+
+    if missing_dates:
+        send_discord_notification(DISCORD_WEBHOOK_URL, _format_weekly_error_message(report_date, missing_dates))
+        return 1
+
+    for col in ["members", "price", "stock"]:
+        if pd.isna(current_row[col]) or pd.isna(previous_row[col]):
+            send_discord_notification(
+                DISCORD_WEBHOOK_URL,
+                f"""◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）
+【週報エラー】stats.csv の数値が不正です（列: {col}）
+#CNPオロチ #開運オロチ
+""",
+            )
+            return 1
+
+    message = format_weekly_discord_message(report_date, current_row, previous_row)
+    send_discord_notification(DISCORD_WEBHOOK_URL, message)
+    return 0
+
+
+def run_daily(now: datetime) -> None:
+    today_str = now.strftime("%Y-%m-%d")
     print(f"Current JST date: {today_str}")
 
     financie_data = get_financie_data_from_web()
@@ -390,25 +459,25 @@ def main() -> None:
 
     yesterday_data: Optional[pd.Series] = None
     if not df.empty:
-        df['date_stripped'] = df['date'].astype(str).str.strip()
-        df['date_dt'] = pd.to_datetime(df['date_stripped'], errors='coerce', format='mixed')
-        invalid_dates = df[df['date_dt'].isna()]
+        df["date_stripped"] = df["date"].astype(str).str.strip()
+        df["date_dt"] = pd.to_datetime(df["date_stripped"], errors="coerce", format="mixed")
+        invalid_dates = df[df["date_dt"].isna()]
         if not invalid_dates.empty:
             print(
                 "Warning: Found rows with unparseable dates. Excluding them from diff calculation: "
                 f"{invalid_dates['date'].tolist()}"
             )
 
-        df_valid = df[df['date_dt'].notna()].copy()
-        df_valid['date_dt'] = df_valid['date_dt'].dt.normalize()
-        df_valid = df_valid.sort_values(by='date_dt')
+        df_valid = df[df["date_dt"].notna()].copy()
+        df_valid["date_dt"] = df_valid["date_dt"].dt.normalize()
+        df_valid = df_valid.sort_values(by="date_dt")
 
         today_dt = pd.to_datetime(today_str).normalize()
-        df_past = df_valid[df_valid['date_dt'] < today_dt]
+        df_past = df_valid[df_valid["date_dt"] < today_dt]
 
         if not df_past.empty:
             latest_available = df_past.iloc[-1]
-            gap_days = (today_dt - latest_available['date_dt']).days
+            gap_days = (today_dt - latest_available["date_dt"]).days
 
             yesterday_data = latest_available
             if gap_days == 1:
@@ -421,7 +490,7 @@ def main() -> None:
                 )
         else:
             print("No past data found for yesterday's calculation.")
-        df = df.drop(columns=['date_dt', 'date_stripped'])
+        df = df.drop(columns=["date_dt", "date_stripped"])
 
     diffs = calculate_diffs(financie_data, yesterday_data)
 
@@ -431,8 +500,29 @@ def main() -> None:
     message = format_discord_message(post_time_fixed, financie_data, diffs)
 
     send_discord_notification(DISCORD_WEBHOOK_URL, message)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """
+    メイン処理。
+    """
+    print("Script started.")
+    parser = argparse.ArgumentParser(description="Post FiNANCiE daily stats (and optional weekly report) to Discord.")
+    parser.add_argument("--weekly", action="store_true", help="Post weekly report based on stats.csv (Saturday vs last Saturday).")
+    args = parser.parse_args(argv)
+
+    JST = timezone(timedelta(hours=+9), "JST")
+    now = datetime.now(JST)
+
+    if args.weekly:
+        exit_code = run_weekly_report(now)
+        print("Script finished.")
+        return exit_code
+
+    run_daily(now)
     print("Script finished.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
