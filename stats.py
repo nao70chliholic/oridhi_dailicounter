@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, Optional, Tuple, Union
 
@@ -24,6 +24,7 @@ FINANCIE_BANCOR_API: str = "https://financie.jp/api/charts/bancor/{connector_add
 STATS_CSV_PATH: str = "stats.csv"
 CONNECTOR_INPUT_SELECTOR: str = "#gtm-connector-address"
 WEI_DECIMAL = Decimal("1e18")
+COMMUNITY_OPEN_DATE: date = date(2025, 1, 17)
 
 # --- 型定義 ---
 FinancieData = Dict[str, Union[int, float]]
@@ -342,7 +343,9 @@ def format_discord_message(post_time: datetime, current_data: FinancieData, diff
     Discordに投稿するためのメッセージ文字列をフォーマットします。
     """
     member_diff, price_diff, stock_diff = diffs
+    open_day = (post_time.date() - COMMUNITY_OPEN_DATE).days + 1
     message = f"""◆FiNANCiE開運オロチトークン現在情報（{post_time.strftime('%Y年%m月%d日 %H:%M時点')}）
+・オープン{open_day}日目
 ・メンバー数 {current_data["owner_count"]:,}人（前日比 {member_diff:+,}人）
 ・トークン価格 {current_data["token_price"]:.4f}円（前日比 {price_diff:+.4f}円）
 ・トークン在庫 {current_data["token_stock"]:,}枚（前日比 {stock_diff:+,}枚）
