@@ -2,7 +2,7 @@ name: Weekly Stats Poster
 
 on:
   schedule:
-    - cron: '0 22 * * 5' # 07:00 JST (Saturday)
+    - cron: '0 23 * * 5' # 08:00 JST (Saturday)
   workflow_dispatch: # for manual runs
 
 jobs:
