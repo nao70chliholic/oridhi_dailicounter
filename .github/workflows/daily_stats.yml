@@ -2,7 +2,7 @@ name: Daily Stats Poster
 
 on:
   schedule:
-    - cron: '30 20 * * *' # 05:30 JST
+    - cron: '30 19 * * *' # 04:30 JST (GitHub Actions の遅延を見込んだ前倒し。目標着地 06:00 JST)
   workflow_dispatch: # for manual runs
 
 jobs:
