@@ -2,6 +2,27 @@
 
 This project automatically posts daily statistics (token price and member count) to Discord.
 
+## stats.csv の列
+
+| 列 | 意味 | 出典 |
+|---|---|---|
+| `date` | 日付 (JST) | |
+| `members` | コミュニティのメンバー数 | コミュニティページ |
+| `price` | トークン価格 (円) | `bancor.latest_price` |
+| `stock` | 販売在庫 (枚)。減る＝買われた | `market.stock` |
+| `volume` | 過去24時間のグロス取引高 (枚) | `market.trading_volume` |
+| `cap` | 時価総額 (円) | `market.capitalization` |
+| `buy` / `sell` | 買い・売りの内訳 (枚) | `volume` と `stock` の増減から算出 |
+
+`volume` / `cap` / `buy` / `sell` は 2026-09 に追加した列。
+market APIのレスポンスには元から含まれていたが取得していなかった値で、
+過去分は遡って取れないため、それ以前の行は空欄。
+
+**buy / sell の求め方**: `volume` はグロス（買い＋売り）、在庫の増減はネット（買い−売り）。
+連立させると `buy = (gross + net) / 2`、`sell = (gross - net) / 2` で一意に決まる
+（`net = -Δstock`）。日次は前日データが1日前にあるときだけ算出し、
+週次は `/week` APIのグロスと、週初・週末の在庫差から求める。
+
 ## Local Execution
 
 To run the `stats.py` script locally, follow these steps:

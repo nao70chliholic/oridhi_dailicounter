@@ -22,7 +22,17 @@ DISCORD_WEBHOOK_URL: Optional[str] = os.getenv("DISCORD_WEBHOOK_URL") or os.gete
 FINANCIE_COMMUNITY_URL: str = "https://financie.jp/communities/orochi_cnp/"
 FINANCIE_MARKET_URL: str = "https://financie.jp/communities/orochi_cnp/market"
 FINANCIE_BANCOR_API: str = "https://financie.jp/api/charts/bancor/{connector_address}/day"
+FINANCIE_BANCOR_WEEK_API: str = "https://financie.jp/api/charts/bancor/{connector_address}/week"
 STATS_CSV_PATH: str = "stats.csv"
+# volume: 過去24時間のグロス取引高(枚) / cap: 時価総額(円) / buy・sell: volumeと在庫増減から分解した枚数
+STATS_EXTRA_COLUMNS: Tuple[str, ...] = ("volume", "cap", "buy", "sell")
+REQUEST_HEADERS: Dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ja,en;q=0.9",
+}
 CONNECTOR_INPUT_SELECTOR: str = "#gtm-connector-address"
 WEI_DECIMAL = Decimal("1e18")
 COMMUNITY_OPEN_DATE: date = date(2025, 1, 17)
@@ -105,15 +115,43 @@ def _parse_float(text: str) -> Optional[float]:
         return None
 
 
+def _parse_comma_number(text: Optional[str]) -> Optional[float]:
+    """
+    "56,781.1" のようなカンマ区切り文字列を float に変換します。
+    """
+    if text is None:
+        return None
+    cleaned = re.sub(r"[^0-9.\-]", "", str(text))
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _split_buy_sell(
+    gross: Optional[float], stock_diff: int, has_previous: bool
+) -> FinancieData:
+    """
+    グロス取引高と在庫の増減から、買い枚数と売り枚数を分解します。
+
+    在庫が減る＝買われた なので net = -stock_diff。
+    gross = buy + sell, net = buy - sell より buy/sell が一意に決まります。
+    整合しない（どちらかが負になる）場合は記録しません。
+    """
+    if gross is None or not has_previous:
+        return {}
+    net = -float(stock_diff)
+    buy = (float(gross) + net) / 2
+    sell = (float(gross) - net) / 2
+    if buy < 0 or sell < 0:
+        print(f"[BuySell] 分解できませんでした (gross={gross}, net={net})。記録をスキップします。")
+        return {}
+    return {"buy": round(buy, 1), "sell": round(sell, 1)}
+
+
 def _fetch_financie_data_with_requests() -> Optional[FinancieData]:
     session = requests.Session()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ja,en;q=0.9",
-    }
+    headers = REQUEST_HEADERS
     try:
         community_res = session.get(FINANCIE_COMMUNITY_URL, headers=headers, timeout=30)
         community_res.raise_for_status()
@@ -178,10 +216,21 @@ def _fetch_market_data_via_api(
 
     print(f"[HTTP] Parsed token price from API: {price}")
     print(f"[HTTP] Parsed token stock from API: {stock}")
-    return {
+    result: FinancieData = {
         "token_price": price,
         "token_stock": stock,
     }
+
+    market = payload.get("market", {}) or {}
+    volume = _parse_comma_number(market.get("trading_volume"))
+    if volume is not None:
+        result["trading_volume"] = volume
+        print(f"[HTTP] Parsed trading volume from API: {volume} {market.get('trading_volume_aggregation_period', '')}")
+    capitalization = _parse_comma_number(market.get("capitalization"))
+    if capitalization is not None:
+        result["capitalization"] = capitalization
+        print(f"[HTTP] Parsed capitalization from API: {capitalization}")
+    return result
 
 
 def get_financie_data_from_web() -> Optional[FinancieData]:
@@ -192,11 +241,80 @@ def get_financie_data_from_web() -> Optional[FinancieData]:
     """
     print("Starting web scraping...")
     data = _fetch_financie_data_with_playwright()
-    if data:
-        return data
+    if not data:
+        print("Playwright scraping failed or returned incomplete data. Falling back to HTTP scraping.")
+        data = _fetch_financie_data_with_requests()
 
-    print("Playwright scraping failed or returned incomplete data. Falling back to HTTP scraping.")
-    return _fetch_financie_data_with_requests()
+    # Playwrightは取引高・時価総額を取らないため、APIから補完する
+    if data and "trading_volume" not in data:
+        extras = _fetch_market_extras()
+        if extras:
+            data.update(extras)
+            print(f"[Extras] Supplemented from market API: {extras}")
+
+    return data
+
+
+def _resolve_connector_address(session: requests.Session) -> Optional[str]:
+    """
+    コミュニティページから connector address を取り出します。
+    """
+    try:
+        community_res = session.get(FINANCIE_COMMUNITY_URL, headers=REQUEST_HEADERS, timeout=30)
+        community_res.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[Connector] Failed to fetch community page: {e}")
+        return None
+
+    soup = BeautifulSoup(community_res.text, "lxml")
+    connector_input = soup.select_one(CONNECTOR_INPUT_SELECTOR)
+    if connector_input and connector_input.get("value"):
+        return connector_input["value"]
+    print("[Connector] Failed to find connector address.")
+    return None
+
+
+def fetch_weekly_volume() -> Optional[float]:
+    """
+    過去7日間のグロス取引高(枚)をmarket APIから取得します。
+
+    CSVの日次volumeを合計する方法は欠測日があると崩れるため、こちらを優先します。
+    取得できなければNoneを返し、呼び出し側でCSV合計にフォールバックします。
+    """
+    session = requests.Session()
+    connector_address = _resolve_connector_address(session)
+    if not connector_address:
+        return None
+
+    url = FINANCIE_BANCOR_WEEK_API.format(connector_address=connector_address)
+    try:
+        response = session.get(url, headers=REQUEST_HEADERS, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as e:
+        print(f"[Weekly] Error fetching weekly market API ({url}): {e}")
+        return None
+
+    market = payload.get("market", {}) or {}
+    volume = _parse_comma_number(market.get("trading_volume"))
+    print(f"[Weekly] API trading volume: {volume} {market.get('trading_volume_aggregation_period', '')}")
+    return volume
+
+
+def _fetch_market_extras() -> FinancieData:
+    """
+    取引高・時価総額だけをmarket APIから取得します（Playwright経路の補完用）。
+    失敗しても日次処理は止めず、空の辞書を返します。
+    """
+    session = requests.Session()
+    connector_address = _resolve_connector_address(session)
+    if not connector_address:
+        return {}
+
+    market_data = _fetch_market_data_via_api(session, REQUEST_HEADERS, connector_address)
+    if not market_data:
+        return {}
+    return {k: v for k, v in market_data.items() if k in ("trading_volume", "capitalization")}
 
 
 def _fetch_financie_data_with_playwright() -> Optional[FinancieData]:
@@ -271,10 +389,14 @@ def read_stats_csv(file_path: str) -> pd.DataFrame:
         for col, dtype in {"price": 0.0, "stock": 0}.items():
             if col not in df.columns:
                 df[col] = dtype
+        # 2026-09追加。過去分は遡って取得できないため既定値は空欄
+        for col in STATS_EXTRA_COLUMNS:
+            if col not in df.columns:
+                df[col] = pd.NA
         return df
     except FileNotFoundError:
         print(f"{file_path} not found. Creating new DataFrame.")
-        return pd.DataFrame(columns=["date", "members", "price", "stock"])
+        return pd.DataFrame(columns=["date", "members", "price", "stock", *STATS_EXTRA_COLUMNS])
 
 
 def calculate_diffs(current_data: FinancieData, yesterday_data: Optional[pd.Series]) -> DiffData:
@@ -302,6 +424,9 @@ def update_stats_csv(df: pd.DataFrame, file_path: str, today_str: str, current_d
         "price": current_data["token_price"],
         "stock": current_data["token_stock"]
     }
+    for csv_col, data_key in (("volume", "trading_volume"), ("cap", "capitalization"), ("buy", "buy"), ("sell", "sell")):
+        if data_key in current_data:
+            today_data_row[csv_col] = current_data[data_key]
 
     df["date"] = df["date"].astype(str).str.strip()
 
@@ -343,17 +468,46 @@ def format_discord_message(post_time: datetime, current_data: FinancieData, diff
     """
     Discordに投稿するためのメッセージ文字列をフォーマットします。
     """
-    member_diff, price_diff, stock_diff = diffs
+    member_diff, price_diff, _stock_diff = diffs
     open_day = (post_time.date() - COMMUNITY_OPEN_DATE).days + 1
-    message = f"""◆FiNANCiE開運オロチトークン現在情報（{post_time.strftime('%Y年%m月%d日 %H:%M時点')}）
-・オープン{open_day}日目
-・メンバー数 {current_data["owner_count"]:,}人（前日比 {member_diff:+,}人）
-・トークン価格 {current_data["token_price"]:.4f}円（前日比 {price_diff:+.4f}円）
-・トークン在庫 {current_data["token_stock"]:,}枚（前日比 {stock_diff:+,}枚）
-#CNPオロチ #開運オロチ
-"""
+    lines = [
+        f"◆FiNANCiE開運オロチトークン現在情報（{post_time.strftime('%Y年%m月%d日 %H:%M時点')}）",
+        f"・オープン{open_day}日目",
+        f"・メンバー数 {current_data['owner_count']:,}人（前日比 {member_diff:+,}人）",
+        f"・トークン価格 {current_data['token_price']:.4f}円（前日比 {price_diff:+.4f}円）",
+    ]
+    lines.extend(_format_trade_lines(
+        current_data.get("trading_volume"),
+        current_data.get("buy"),
+        current_data.get("sell"),
+        current_data.get("capitalization"),
+        "24時間の売買",
+    ))
+    lines.append("#CNPオロチ #開運オロチ")
+    message = "\n".join(lines) + "\n"
     print(f"Formatted Discord message:\n{message}")
     return message
+
+
+def _format_trade_lines(
+    volume: Optional[float],
+    buy: Optional[float],
+    sell: Optional[float],
+    capitalization: Optional[float],
+    volume_label: str,
+) -> list[str]:
+    """
+    売買と時価総額の行を組み立てます。データが無い期間は行ごと省略します。
+    """
+    lines: list[str] = []
+    if volume is not None:
+        if buy is not None and sell is not None:
+            lines.append(f"・{volume_label} {volume:,.0f}枚（買い {buy:,.0f}枚／売り {sell:,.0f}枚）")
+        else:
+            lines.append(f"・{volume_label} {volume:,.0f}枚")
+    if capitalization is not None:
+        lines.append(f"・時価総額 {capitalization:,.0f}円")
+    return lines
 
 
 def send_discord_notification(webhook_url: Optional[str], message: str) -> None:
@@ -383,17 +537,78 @@ def _get_latest_row_for_date(df: pd.DataFrame, target_date: date) -> Optional[pd
     return matches.iloc[-1]
 
 
-def format_weekly_discord_message(report_date: date, current_row: pd.Series, previous_row: pd.Series) -> str:
+def _optional_number(value) -> Optional[float]:
+    """
+    pd.Series等から取り出した値を、欠損ならNoneにして返します。
+    """
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_weekly_trade(
+    df: pd.DataFrame, report_date: date, previous_date: date, current_row: pd.Series, previous_row: pd.Series
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    週次のグロス取引高と、買い・売りの内訳を求めます。
+
+    グロスは日次volumeの7日合計、ネットは在庫の増減から取ります。
+    7日分が揃っていない期間（volume記録の開始直後など）はNoneを返し、行ごと省略させます。
+    """
+    gross = fetch_weekly_volume()
+
+    if gross is None and "volume" in df.columns:
+        # APIが取れなかったときだけCSVの日次volumeを合計する（欠測があれば諦める）
+        dates = df["date"].astype(str).str.strip()
+        window = df[(dates > previous_date.strftime("%Y-%m-%d")) & (dates <= report_date.strftime("%Y-%m-%d"))]
+        volumes = pd.to_numeric(window["volume"], errors="coerce")
+        if len(window) == 7 and volumes.notna().all():
+            gross = float(volumes.sum())
+            print(f"[Weekly] CSVの日次volumeを合計しました: {gross}")
+        else:
+            print(f"[Weekly] volumeが7日分揃っていません（{int(volumes.notna().sum())}/7）。")
+
+    if gross is None:
+        print("[Weekly] グロス取引高が取得できませんでした。売買行は省略します。")
+        return None, None, None
+
+    net = float(previous_row["stock"]) - float(current_row["stock"])  # 在庫が減る＝買われた
+    buy = (gross + net) / 2
+    sell = (gross - net) / 2
+    if buy < 0 or sell < 0:
+        print(f"[Weekly] 買い/売りに分解できませんでした (gross={gross}, net={net})。合計のみ表示します。")
+        return gross, None, None
+    return gross, buy, sell
+
+
+def format_weekly_discord_message(
+    report_date: date,
+    current_row: pd.Series,
+    previous_row: pd.Series,
+    weekly_volume: Optional[float] = None,
+    weekly_buy: Optional[float] = None,
+    weekly_sell: Optional[float] = None,
+) -> str:
     member_diff = int(current_row["members"] - previous_row["members"])
     price_diff = float(current_row["price"] - previous_row["price"])
-    stock_diff = int(current_row["stock"] - previous_row["stock"])
 
-    message = f"""◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）
-・メンバー数 {int(current_row["members"]):,}人（前週比 {member_diff:+,}人）
-・トークン価格 {float(current_row["price"]):.4f}円（前週比 {price_diff:+.4f}円）
-・トークン在庫 {int(current_row["stock"]):,}枚（前週比 {stock_diff:+,}枚）
-#CNPオロチ #開運オロチ
-"""
+    lines = [
+        f"◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）",
+        f"・メンバー数 {int(current_row['members']):,}人（前週比 {member_diff:+,}人）",
+        f"・トークン価格 {float(current_row['price']):.4f}円（前週比 {price_diff:+.4f}円）",
+    ]
+    lines.extend(_format_trade_lines(
+        weekly_volume,
+        weekly_buy,
+        weekly_sell,
+        _optional_number(current_row.get("cap")),
+        "今週の売買",
+    ))
+    lines.append("#CNPオロチ #開運オロチ")
+    message = "\n".join(lines) + "\n"
     print(f"Formatted weekly Discord message:\n{message}")
     return message
 
@@ -440,7 +655,12 @@ def run_weekly_report(now: datetime) -> int:
             )
             return 1
 
-    message = format_weekly_discord_message(report_date, current_row, previous_row)
+    weekly_volume, weekly_buy, weekly_sell = compute_weekly_trade(
+        df, report_date, previous_date, current_row, previous_row
+    )
+    message = format_weekly_discord_message(
+        report_date, current_row, previous_row, weekly_volume, weekly_buy, weekly_sell
+    )
     send_discord_notification(DISCORD_WEBHOOK_URL, message)
     return 0
 
@@ -458,6 +678,7 @@ def run_daily(now: datetime) -> None:
     df = apply_manual_yesterday_if_needed(df, STATS_CSV_PATH, now)
 
     yesterday_data: Optional[pd.Series] = None
+    gap_days: Optional[int] = None
     if not df.empty:
         df["date_stripped"] = df["date"].astype(str).str.strip()
         df["date_dt"] = pd.to_datetime(df["date_stripped"], errors="coerce", format="mixed")
@@ -493,6 +714,15 @@ def run_daily(now: datetime) -> None:
         df = df.drop(columns=["date_dt", "date_stripped"])
 
     diffs = calculate_diffs(financie_data, yesterday_data)
+
+    financie_data.update(
+        _split_buy_sell(
+            financie_data.get("trading_volume"),
+            diffs[2],
+            # volumeは過去24時間なので、前日データが1日前のときだけ在庫差分と対応する
+            yesterday_data is not None and gap_days == 1,
+        )
+    )
 
     df = update_stats_csv(df, STATS_CSV_PATH, today_str, financie_data)
 
