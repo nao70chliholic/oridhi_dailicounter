@@ -5,6 +5,11 @@ on:
     - cron: '30 19 * * *' # 04:30 JST (GitHub Actions の遅延を見込んだ前倒し。目標着地 06:00 JST)
   workflow_dispatch: # for manual runs
 
+# CNP側のジョブと同じリポジトリにコミットするため直列化する
+concurrency:
+  group: stats-commit
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest

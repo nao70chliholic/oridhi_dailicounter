@@ -1,0 +1,55 @@
+name: Daily Stats Poster (CNP)
+
+on:
+  schedule:
+    - cron: '0 20 * * *' # 05:00 JST（オロチ側 04:30 とずらして同時コミットを避ける）
+  workflow_dispatch:
+
+# stats.csv / stats_cnp.csv を同じリポジトリにコミットするため、
+# オロチ側のジョブと同時に走らないように直列化する
+concurrency:
+  group: stats-commit
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      FINANCIE_SLUG: cnpninjadao
+      STATS_CSV_PATH: stats_cnp.csv
+      TITLE_PREFIX: 'FiNANCiE CNPスタープロジェクト'
+      POST_HASHTAGS: '#CNPスタープロジェクト #CNPトークン'
+      COMMUNITY_OPEN_DATE: '' # 開設日が不明なので「オープンN日目」は出さない
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Playwrightのブラウザは入れない。市況はAPI、メンバー数はHTMLから取れるため
+      # HTTP経路だけで完結する（Playwrightは起動に失敗してHTTPへフォールバックする）
+
+      - name: Run script to update stats
+        env:
+          # Discordチャンネルを用意したら DISCORD_WEBHOOK_URL_CNP を Secrets に追加する。
+          # 未設定のうちは投稿をスキップし、CSVへの記録だけ行う。
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_CNP }}
+        run: python stats.py
+
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add stats_cnp.csv
+          git diff --staged --quiet || (git commit -m "Update daily stats (CNP)" && git pull --rebase && git push)

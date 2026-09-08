@@ -2,6 +2,30 @@
 
 This project automatically posts daily statistics (token price and member count) to Discord.
 
+## 対象コミュニティ
+
+1つのスクリプトで複数のFiNANCiEコミュニティを扱う。環境変数を設定しなければ
+既定値（開運オロチ）で動くので、オロチ側のワークフローは何も渡していない。
+
+| 環境変数 | 既定値（開運オロチ） | CNPスタープロジェクト |
+|---|---|---|
+| `FINANCIE_SLUG` | `orochi_cnp` | `cnpninjadao` |
+| `STATS_CSV_PATH` | `stats.csv` | `stats_cnp.csv` |
+| `TITLE_PREFIX` | `FiNANCiE開運オロチトークン` | `FiNANCiE CNPスタープロジェクト` |
+| `POST_HASHTAGS` | `#CNPオロチ #開運オロチ` | `#CNPスタープロジェクト #CNPトークン` |
+| `COMMUNITY_OPEN_DATE` | `2025-01-17` | 空（「オープンN日目」を出さない） |
+
+**Discordへの投稿は任意。** `DISCORD_WEBHOOK_URL` が未設定なら投稿をスキップし、
+CSVへの記録だけ行う。CNP側は Secrets の `DISCORD_WEBHOOK_URL_CNP` を追加した時点で
+投稿が始まる（コード変更は不要）。
+
+両方のジョブが同じリポジトリにCSVをコミットするため、
+ワークフローは `concurrency: stats-commit` で直列化している。
+
+CNP側の週報ワークフローはまだ置いていない。週報は「その週の土曜」と「前週の土曜」の
+2行を必要とするので、2週分たまるまでは必ず失敗するため。
+`weekly_report.yml` をコピーして上表の環境変数を足せば動く。
+
 ## stats.csv の列
 
 | 列 | 意味 | 出典 |

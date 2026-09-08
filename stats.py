@@ -19,11 +19,18 @@ except ImportError:  # Playwrightがインストールされていない場合�
 # --- 定数定義 ---
 load_dotenv()
 DISCORD_WEBHOOK_URL: Optional[str] = os.getenv("DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK")
-FINANCIE_COMMUNITY_URL: str = "https://financie.jp/communities/orochi_cnp/"
-FINANCIE_MARKET_URL: str = "https://financie.jp/communities/orochi_cnp/market"
+# --- コミュニティ設定 ---
+# 環境変数を設定しなければ既定値（開運オロチ）で動く。CNPスタープロジェクトなど
+# 別コミュニティは、ワークフロー側で環境変数を渡して切り替える。
+FINANCIE_SLUG: str = os.getenv("FINANCIE_SLUG", "orochi_cnp")
+TITLE_PREFIX: str = os.getenv("TITLE_PREFIX", "FiNANCiE開運オロチトークン")
+POST_HASHTAGS: str = os.getenv("POST_HASHTAGS", "#CNPオロチ #開運オロチ")
+
+FINANCIE_COMMUNITY_URL: str = f"https://financie.jp/communities/{FINANCIE_SLUG}/"
+FINANCIE_MARKET_URL: str = f"https://financie.jp/communities/{FINANCIE_SLUG}/market"
 FINANCIE_BANCOR_API: str = "https://financie.jp/api/charts/bancor/{connector_address}/day"
 FINANCIE_BANCOR_WEEK_API: str = "https://financie.jp/api/charts/bancor/{connector_address}/week"
-STATS_CSV_PATH: str = "stats.csv"
+STATS_CSV_PATH: str = os.getenv("STATS_CSV_PATH", "stats.csv")
 # volume: 過去24時間のグロス取引高(枚) / cap: 時価総額(円) / buy・sell: volumeと在庫増減から分解した枚数
 STATS_EXTRA_COLUMNS: Tuple[str, ...] = ("volume", "cap", "buy", "sell")
 REQUEST_HEADERS: Dict[str, str] = {
@@ -35,7 +42,11 @@ REQUEST_HEADERS: Dict[str, str] = {
 }
 CONNECTOR_INPUT_SELECTOR: str = "#gtm-connector-address"
 WEI_DECIMAL = Decimal("1e18")
-COMMUNITY_OPEN_DATE: date = date(2025, 1, 17)
+# 空文字を渡すと「オープンN日目」の行を出さない（開設日が分からないコミュニティ用）
+_open_date_raw: str = os.getenv("COMMUNITY_OPEN_DATE", "2025-01-17").strip()
+COMMUNITY_OPEN_DATE: Optional[date] = (
+    datetime.strptime(_open_date_raw, "%Y-%m-%d").date() if _open_date_raw else None
+)
 
 # --- 型定義 ---
 FinancieData = Dict[str, Union[int, float]]
@@ -469,10 +480,12 @@ def format_discord_message(post_time: datetime, current_data: FinancieData, diff
     Discordに投稿するためのメッセージ文字列をフォーマットします。
     """
     member_diff, price_diff, _stock_diff = diffs
-    open_day = (post_time.date() - COMMUNITY_OPEN_DATE).days + 1
     lines = [
-        f"◆FiNANCiE開運オロチトークン現在情報（{post_time.strftime('%Y年%m月%d日 %H:%M時点')}）",
-        f"・オープン{open_day}日目",
+        f"◆{TITLE_PREFIX}現在情報（{post_time.strftime('%Y年%m月%d日 %H:%M時点')}）",
+    ]
+    if COMMUNITY_OPEN_DATE is not None:
+        lines.append(f"・オープン{(post_time.date() - COMMUNITY_OPEN_DATE).days + 1}日目")
+    lines += [
         f"・メンバー数 {current_data['owner_count']:,}人（前日比 {member_diff:+,}人）",
         f"・トークン価格 {current_data['token_price']:.4f}円（前日比 {price_diff:+.4f}円）",
     ]
@@ -483,7 +496,7 @@ def format_discord_message(post_time: datetime, current_data: FinancieData, diff
         current_data.get("capitalization"),
         "24時間の売買",
     ))
-    lines.append("#CNPオロチ #開運オロチ")
+    lines.append(POST_HASHTAGS)
     message = "\n".join(lines) + "\n"
     print(f"Formatted Discord message:\n{message}")
     return message
@@ -596,7 +609,7 @@ def format_weekly_discord_message(
     price_diff = float(current_row["price"] - previous_row["price"])
 
     lines = [
-        f"◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）",
+        f"◆{TITLE_PREFIX}週報（{report_date.strftime('%Y年%m月%d日')}）",
         f"・メンバー数 {int(current_row['members']):,}人（前週比 {member_diff:+,}人）",
         f"・トークン価格 {float(current_row['price']):.4f}円（前週比 {price_diff:+.4f}円）",
     ]
@@ -607,7 +620,7 @@ def format_weekly_discord_message(
         _optional_number(current_row.get("cap")),
         "今週の売買",
     ))
-    lines.append("#CNPオロチ #開運オロチ")
+    lines.append(POST_HASHTAGS)
     message = "\n".join(lines) + "\n"
     print(f"Formatted weekly Discord message:\n{message}")
     return message
@@ -615,9 +628,9 @@ def format_weekly_discord_message(
 
 def _format_weekly_error_message(report_date: date, missing_dates: list[date]) -> str:
     missing = ", ".join(d.strftime("%Y-%m-%d") for d in missing_dates)
-    message = f"""◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）
-【週報エラー】stats.csv に必要なデータがありません（不足: {missing}）
-#CNPオロチ #開運オロチ
+    message = f"""◆{TITLE_PREFIX}週報（{report_date.strftime('%Y年%m月%d日')}）
+【週報エラー】{STATS_CSV_PATH} に必要なデータがありません（不足: {missing}）
+{POST_HASHTAGS}
 """
     print(f"Formatted weekly error message:\n{message}")
     return message
@@ -648,9 +661,9 @@ def run_weekly_report(now: datetime) -> int:
         if pd.isna(current_row[col]) or pd.isna(previous_row[col]):
             send_discord_notification(
                 DISCORD_WEBHOOK_URL,
-                f"""◆FiNANCiE開運オロチトークン週報（{report_date.strftime('%Y年%m月%d日')}）
-【週報エラー】stats.csv の数値が不正です（列: {col}）
-#CNPオロチ #開運オロチ
+                f"""◆{TITLE_PREFIX}週報（{report_date.strftime('%Y年%m月%d日')}）
+【週報エラー】{STATS_CSV_PATH} の数値が不正です（列: {col}）
+{POST_HASHTAGS}
 """,
             )
             return 1
