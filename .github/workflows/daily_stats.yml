@@ -39,6 +39,21 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL || secrets.DISCORD_WEBHOOK || vars.DISCORD_WEBHOOK_URL }}
         run: python stats.py
 
+      # 週報は土曜だけ、日次と同じ実行の中で出す。
+      # 別ワークフローにすると「日次の遅延 + 週報の遅延」が直列に乗り、
+      # 着地が08:55前後（実測中央値）まで遅れて朝の時間帯に間に合わないため。
+      # 遅延でUTCの日付がまたぐので、JSTの曜日で判定する（6 = 土曜）。
+      - name: Post weekly report on Saturdays (JST)
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL || secrets.DISCORD_WEBHOOK || vars.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ "$(TZ=Asia/Tokyo date +%u)" = "6" ]; then
+            echo "JSTでは土曜。週報を投稿します。"
+            python stats.py --weekly
+          else
+            echo "JSTでは土曜ではないのでスキップ（$(TZ=Asia/Tokyo date '+%Y-%m-%d %a')）"
+          fi
+
       - name: Commit and push if changed
         run: |
           git config --global user.name 'github-actions[bot]'
