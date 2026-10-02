@@ -2,7 +2,8 @@ name: Daily Stats Poster (CNP)
 
 on:
   schedule:
-    - cron: '0 20 * * *' # 05:00 JST（オロチ側 04:30 とずらして同時コミットを避ける）
+    - cron: '35 18 * * *' # 03:35 JST（オロチ側 03:05 とずらして同時コミットを避ける）
+    # 2026-10-03: オロチ側と同じ理由で 05:00 → 03:35 へ前倒し。
   workflow_dispatch:
 
 # stats.csv / stats_cnp.csv を同じリポジトリにコミットするため、
