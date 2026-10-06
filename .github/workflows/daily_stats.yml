@@ -2,10 +2,14 @@ name: Daily Stats Poster
 
 on:
   schedule:
-    - cron: '05 18 * * *' # 03:05 JST（GitHub Actionsの遅延を見込んだ前倒し。目標着地 06:00 JST）
-    # 2026-10-03: 遅延が +125〜195分 から +216〜263分 へ悪化し、着地が08:00を
-    # 超える日が続いたため 04:30 → 03:05 へ前倒し。過去20日の遅延を当てると最遅07:27。
-    # 画像の生成が土日の 7/8/9時なので、テキストは08:00前に着いている必要がある。
+    # 01:05 / 02:05 / 03:05 / 04:05 JST の4回撃つ。
+    # GitHub Actionsのスケジュール遅延は中央値+183分・最大+536分（実測n=40）で、
+    # 前倒しでは尾を取り切れないため。先に成功した1回だけが実際の仕事をし、
+    # 残りは最初のステップで抜ける（今日の行がもうあるかを見るだけ）。
+    # 画像の生成は土日の 7/8/9時なので、テキストは08:00前に着いている必要がある。
+    # 経緯: 04:30 → 03:05（2026-10-03）に前倒ししたが、10-06に +354分 が出て外れた。
+    #       単発では尾を取り切れないと判断し、2026-10-06 に複数回方式へ変更。
+    - cron: '05 16,17,18,19 * * *'
   workflow_dispatch: # for manual runs
 
 # CNP側のジョブと同じリポジトリにコミットするため直列化する
@@ -22,20 +26,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 同じ日に複数回起動するので、すでに今日の行があれば以降を全部飛ばす。
+      # 手動実行（workflow_dispatch）のときは必ず動かす。
+      - name: Skip if today's row already exists
+        id: check
+        run: |
+          TODAY=$(TZ=Asia/Tokyo date +%F)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "手動実行なので続行"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif grep -q "^${TODAY}," stats.csv; then
+            echo "${TODAY} の行はすでにある。この回はここで終了。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${TODAY} の行がないので続行"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python 3.12
+        if: steps.check.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: 3.12
 
       - name: Install dependencies
+        if: steps.check.outputs.skip != 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Install Playwright browsers
+        if: steps.check.outputs.skip != 'true'
         run: playwright install --with-deps chromium
 
       - name: Run script to update stats and post to Discord
+        if: steps.check.outputs.skip != 'true'
         env:
           # Prefer GitHub Actions Secrets. Supports both secret names for backward compatibility.
           # vars.DISCORD_WEBHOOK_URL is a last-resort fallback (not recommended; it's not a secret).
@@ -47,6 +72,7 @@ jobs:
       # 着地が08:55前後（実測中央値）まで遅れて朝の時間帯に間に合わないため。
       # 遅延でUTCの日付がまたぐので、JSTの曜日で判定する（6 = 土曜）。
       - name: Post weekly report on Saturdays (JST)
+        if: steps.check.outputs.skip != 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL || secrets.DISCORD_WEBHOOK || vars.DISCORD_WEBHOOK_URL }}
         run: |
@@ -58,6 +84,7 @@ jobs:
           fi
 
       - name: Commit and push if changed
+        if: steps.check.outputs.skip != 'true'
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
